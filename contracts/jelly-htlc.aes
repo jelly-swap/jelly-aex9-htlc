@@ -140,12 +140,12 @@ contract JellyHTLC =
     
   function generate_swap_message(_swap : swap) : string =
     concat([
-      swap.output_network,
-      swap.output_address,
-      Int.to_str(swap.input_amount),
-      Int.to_str(swap.output_amount),
-      Int.to_str(swap.expiration),
-      Bytes.to_str(swap.hash_lock),
+      _swap.output_network,
+      _swap.output_address,
+      Int.to_str(_swap.input_amount),
+      Int.to_str(_swap.output_amount),
+      Int.to_str(_swap.expiration),
+      Bytes.to_str(_swap.hash_lock),
       Address.to_str(token_address(_swap.token))])
   
   function is_active(x : status) : bool =
