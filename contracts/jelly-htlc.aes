@@ -1,0 +1,166 @@
+@compiler >= 4
+
+include "List.aes"
+include "aex9-interface.aes"
+
+contract JellyHTLC = 
+
+  record state = { swaps : map(hash, swap) }
+
+  datatype status = INVALID | ACTIVE | REFUNDED | WITHDRAWN | EXPIRED 
+
+  record swap = {
+    input_amount : int,
+    output_amount : int,
+    expiration : int,
+    hash_lock : hash,
+    status: status,
+    token: AEX9Token,
+    sender : address,
+    receiver : address,
+    output_network : string,
+    output_address : string}
+
+  datatype event =
+    Withdraw(hash, address, address, string)
+    | Refund(hash, address, address, string)
+    | NewSwap(hash, address, address, string)
+
+  stateful entrypoint new_swap(
+      input_amount : int,
+      output_amount : int,
+      expiration : int, 
+      hash_lock : hash, 
+      receiver : address, 
+      token: AEX9Token,
+      output_network : string, 
+      output_address : string) =
+    
+    let sender : address = Call.caller
+        
+    let id : hash = generate_id(sender, receiver, input_amount, hash_lock, expiration, token)
+    
+    require(!swap_exists(id), "SWAP_ALREADY_EXISTS")
+    
+    let _swap : swap = { 
+      input_amount = input_amount,
+      output_amount = output_amount,
+      expiration = expiration,
+      hash_lock = hash_lock,
+      status = ACTIVE,
+      token = token,
+      sender = sender,
+      receiver = receiver,
+      output_network = output_network,
+      output_address = output_address }
+
+    require(expiration > Chain.timestamp, "INVALID_TIME")
+    require(input_amount > 0, "INVALID_AMOUNT")
+
+    token.transfer_allowance(sender, Contract.address, input_amount)
+
+    put(state{ swaps[id] = _swap })
+
+    let swap_message : string = generate_swap_message(_swap)
+    
+    Chain.event(NewSwap(id, sender, receiver, swap_message))
+
+  stateful entrypoint withdraw(id : hash, secret : hash, token: AEX9Token) =
+    let _swap : swap = state.swaps[id]
+    
+    withdrawable(_swap, secret, token)
+
+    token.transfer(_swap.receiver, _swap.input_amount)
+
+    put(state{swaps[id].status = WITHDRAWN})
+
+    let withdraw_message : string = generate_withdraw_message(secret, _swap.hash_lock, token)
+
+    Chain.event(Withdraw(id, _swap.sender, _swap.receiver, withdraw_message))
+
+  stateful entrypoint refund(id : hash, token: AEX9Token) =
+    let _swap : swap = state.swaps[id]
+    
+    refundable(_swap, token)
+    
+    token.transfer(_swap.sender, _swap.input_amount)
+
+    put(state{ swaps[id].status = REFUNDED })
+
+    let refund_message : string = generate_refund_message(_swap.hash_lock, token)
+
+    Chain.event(Refund(id, _swap.sender, _swap.receiver, refund_message))
+
+  entrypoint get_one_status(id : hash) : status =
+    let _swap : swap = state.swaps[id]
+
+    if(_swap.status == ACTIVE &&
+        _swap.expiration < Chain.timestamp)
+      EXPIRED
+    else
+      _swap.status
+
+  entrypoint get_many_status(ids : list(hash)) : list(status) =
+    List.map((id) => get_one_status(id), ids)
+
+  entrypoint generate_id(sender : address, receiver : address,
+   input_amount : int, hash_lock : hash, expiration : int, token : AEX9Token) : hash =
+    let packed_string : string = 
+     cc([
+       Address.to_str(sender),
+       Address.to_str(receiver),
+       Int.to_str(input_amount),
+       Bytes.to_str(hash_lock),
+       Int.to_str(expiration),
+       Address.to_str(token_address(token))])
+    
+    Crypto.sha256(packed_string)
+  
+  entrypoint get_swap(id : hash) : swap =
+    require(swap_exists(id), "SWAP_NOT_FOUND")
+    state.swaps[id]
+
+  function withdrawable(_swap : swap, secret : hash, token: AEX9Token) =
+    require(is_active(_swap.status), "SWAP_NOT_ACTIVE")
+    require(_swap.token == token, "INVALID_TOKEN")
+    require(_swap.expiration > Chain.timestamp, "INVALID_TIME")
+    require(_swap.hash_lock == Crypto.sha256(secret), "INVALID_SECRET")
+
+  function refundable(_swap: swap, token: AEX9Token) =
+    require(is_active(_swap.status), "SWAP_NOT_ACTIVE")
+    require(_swap.token == token, "INVALID_TOKEN")
+    require(Chain.timestamp >= _swap.expiration, "INVALID_TIME")
+    require(_swap.sender == Call.caller, "INVALID_SENDER")
+
+  function generate_withdraw_message(secret : hash, hash_lock : hash, token: AEX9Token) : string =
+    concat([Bytes.to_str(secret), Bytes.to_str(hash_lock), Address.to_str(token.address)])
+
+  function generate_refund_message(hash_lock : hash, token: AEX9Token) : string =
+    concat([Bytes.to_str(hash_lock), Address.to_str(token_address(token))])
+    
+  function generate_swap_message(_swap : swap) : string =
+    concat([
+      swap.output_network,
+      swap.output_address,
+      Int.to_str(swap.input_amount),
+      Int.to_str(swap.output_amount),
+      Int.to_str(swap.expiration),
+      Bytes.to_str(swap.hash_lock),
+      Address.to_str(token_address(_swap.token))])
+  
+  function is_active(x : status) : bool =
+    x == ACTIVE
+
+  function swap_exists(id : hash) : bool =
+    Map.member(id, state.swaps)
+
+  function cc(ss : list(string)) : string =
+   switch(ss)
+    s :: ss => List.foldl(String.concat, s, ss)
+
+  function concat(ss : list(string)) : string =
+   cc(List.intersperse(",", ss))
+  
+  function token_address(token : AEX9Token) : address = token.address
+
+  entrypoint  init() = { swaps = {} }
